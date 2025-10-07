@@ -219,7 +219,16 @@ class SSHTCPServer:
                             break
                         if char in (b'\n', b'\r'):
                             break
-                        command_buffer += char
+                        # Handle backspace/delete
+                        if char in (b'\x7f', b'\x08'):
+                            if command_buffer:
+                                command_buffer = command_buffer[:-1]
+                                # Move cursor back, overwrite with space, move back again
+                                channel.send(b'\x08 \x08')
+                        else:
+                            command_buffer += char
+                            # Echo the character back to the client
+                            channel.send(char)
                     
                     if not command_buffer:
                         break
