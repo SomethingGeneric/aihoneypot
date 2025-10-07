@@ -1,16 +1,69 @@
-"""TCP server for AI Honeypot with SSH-like functionality."""
+"""TCP server for AI Honeypot with SSH functionality."""
 
 import socket
 import threading
 import signal
 import sys
 import time
+import paramiko
+import io
 from typing import Optional
 from bash import BashShell
 
 
+class HoneypotSSHServer(paramiko.ServerInterface):
+    """SSH server interface for honeypot that accepts all authentication."""
+    
+    def __init__(self, address: str):
+        self.address = address
+        self.username = None
+        self.password = None
+        self.exec_command = None
+        self.event = threading.Event()
+        
+    def check_auth_password(self, username: str, password: str) -> int:
+        """Accept any password and log the attempt."""
+        self.username = username
+        self.password = password
+        print(f"[{self.address}] Login attempt - User: {username}, Pass: {password}")
+        return paramiko.AUTH_SUCCESSFUL
+    
+    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        """Accept any public key and log the attempt."""
+        self.username = username
+        print(f"[{self.address}] Public key auth attempt - User: {username}")
+        return paramiko.AUTH_SUCCESSFUL
+    
+    def get_allowed_auths(self, username: str) -> str:
+        """Allow both password and public key authentication."""
+        return "password,publickey"
+    
+    def check_channel_request(self, kind: str, chanid: int) -> int:
+        """Accept session channel requests."""
+        if kind == "session":
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+    
+    def check_channel_shell_request(self, channel: paramiko.Channel) -> bool:
+        """Accept shell requests."""
+        self.event.set()
+        return True
+    
+    def check_channel_pty_request(self, channel: paramiko.Channel, term: bytes,
+                                   width: int, height: int, pixelwidth: int,
+                                   pixelheight: int, modes: bytes) -> bool:
+        """Accept PTY requests."""
+        return True
+    
+    def check_channel_exec_request(self, channel: paramiko.Channel, command: bytes) -> bool:
+        """Accept exec requests."""
+        self.exec_command = command.decode('utf-8', errors='ignore')
+        self.event.set()
+        return True
+
+
 class SSHTCPServer:
-    """TCP server that mimics SSH server behavior for honeypot purposes."""
+    """TCP server that implements SSH protocol for honeypot purposes."""
     
     def __init__(self, host: str = "0.0.0.0", port: int = 2222, 
                  endpoint: Optional[str] = None, provider: Optional[str] = None):
@@ -21,6 +74,16 @@ class SSHTCPServer:
         self.server_socket = None
         self.running = False
         self.sessions = []
+        self.host_key = None
+        self._generate_host_key()
+    
+    def _generate_host_key(self):
+        """Generate an RSA host key for the SSH server."""
+        try:
+            self.host_key = paramiko.RSAKey.generate(2048)
+        except Exception as e:
+            print(f"Warning: Could not generate RSA key: {e}")
+            print("Server will not be able to accept SSH connections")
         
     def start(self):
         """Start the TCP server."""
@@ -82,58 +145,89 @@ class SSHTCPServer:
         print("Server stopped")
         
     def _handle_client(self, client_socket: socket.socket, address: tuple):
-        """Handle a client connection."""
+        """Handle a client connection with SSH protocol."""
+        transport = None
         try:
-            # Set timeout for client operations
-            client_socket.settimeout(5.0)
+            # Create SSH transport
+            transport = paramiko.Transport(client_socket)
+            transport.add_server_key(self.host_key)
             
-            # Use plain text protocol (telnet-like) for authentication
-            # Note: We do NOT send an SSH banner because we cannot implement
-            # the full SSH protocol. SSH clients will fail to connect, but
-            # telnet clients and simple scripts will work fine.
-            client_socket.send(b"login: ")
+            # Set up the SSH server interface
+            server = HoneypotSSHServer(address[0])
+            
             try:
-                username = client_socket.recv(1024).decode('utf-8', errors='ignore').strip()
-            except:
-                username = "anonymous"
-                
-            if not username:
-                client_socket.close()
+                transport.start_server(server=server)
+            except paramiko.SSHException as e:
+                print(f"[{address[0]}] SSH negotiation failed: {e}")
                 return
-                
-            client_socket.send(b"Password: ")
-            try:
-                password = client_socket.recv(1024).decode('utf-8', errors='ignore').strip()
-            except:
-                password = ""
             
-            # Log the authentication attempt
-            print(f"[{address[0]}] Login attempt - User: {username}, Pass: {password}")
+            # Wait for authentication
+            channel = transport.accept(20)
+            if channel is None:
+                print(f"[{address[0]}] No channel opened")
+                return
             
-            # Always "authenticate successfully"
-            welcome_msg = f"Welcome to Ubuntu 22.04.1 LTS (GNU/Linux 5.15.0-58-generic x86_64)\r\n\r\n"
-            welcome_msg += "Last login: " + time.strftime("%a %b %d %H:%M:%S %Y") + f" from {address[0]}\r\n"
-            client_socket.send(welcome_msg.encode('utf-8'))
+            # Wait for shell or exec request
+            server.event.wait(10)
+            if not server.event.is_set():
+                print(f"[{address[0]}] Client never asked for a shell or exec")
+                channel.close()
+                return
+            
+            username = server.username or "unknown"
             
             # Initialize the AI shell for this session
             bash_shell = BashShell(self.endpoint, self.provider)
             
+            # Check if this is an exec command (single command execution)
+            if server.exec_command:
+                # Log and execute the command
+                command = server.exec_command
+                print(f"[{address[0]}:{username}] Exec command: {command}")
+                
+                try:
+                    response = bash_shell.execute_command(command)
+                    channel.send(response)
+                    if not response.endswith('\n'):
+                        channel.send('\n')
+                except Exception as e:
+                    error_msg = f"Error: {str(e)}\n"
+                    channel.send(error_msg)
+                
+                channel.send_exit_status(0)
+                channel.close()
+                return
+            
+            # This is an interactive shell session
+            # Send welcome message
+            welcome_msg = f"Welcome to Ubuntu 22.04.1 LTS (GNU/Linux 5.15.0-58-generic x86_64)\r\n\r\n"
+            welcome_msg += "Last login: " + time.strftime("%a %b %d %H:%M:%S %Y") + f" from {address[0]}\r\n"
+            channel.send(welcome_msg)
+            
             # Main shell loop
+            channel.settimeout(300.0)  # 5 minute timeout
             while self.running:
                 try:
                     # Send prompt
-                    client_socket.send(b"bash$: ")
+                    channel.send("bash$: ")
                     
-                    # Receive command
-                    client_socket.settimeout(300.0)  # 5 minute timeout
-                    data = client_socket.recv(4096)
+                    # Receive command (read until newline)
+                    command_buffer = b""
+                    while True:
+                        char = channel.recv(1)
+                        if not char:
+                            break
+                        if char in (b'\n', b'\r'):
+                            break
+                        command_buffer += char
                     
-                    if not data:
+                    if not command_buffer:
                         break
                         
-                    command = data.decode('utf-8', errors='ignore').strip()
+                    command = command_buffer.decode('utf-8', errors='ignore').strip()
                     
                     if not command:
+                        channel.send("\r\n")
                         continue
                         
                     # Log command
@@ -141,7 +235,7 @@ class SSHTCPServer:
                     
                     # Handle exit commands
                     if command.lower() in ['exit', 'quit', 'logout']:
-                        client_socket.send(b"logout\r\n")
+                        channel.send("logout\r\n")
                         break
                     
                     # Execute command via AI
@@ -149,10 +243,10 @@ class SSHTCPServer:
                         response = bash_shell.execute_command(command)
                         # Ensure proper line endings for network transmission
                         response = response.replace('\n', '\r\n')
-                        client_socket.send((response + '\r\n').encode('utf-8'))
+                        channel.send(response + '\r\n')
                     except Exception as e:
                         error_msg = f"Error: {str(e)}\r\n"
-                        client_socket.send(error_msg.encode('utf-8'))
+                        channel.send(error_msg)
                         
                 except socket.timeout:
                     print(f"[{address[0]}] Session timeout")
@@ -160,10 +254,17 @@ class SSHTCPServer:
                 except Exception as e:
                     print(f"[{address[0]}] Error in session: {e}")
                     break
+            
+            channel.close()
                     
         except Exception as e:
             print(f"[{address[0]}] Connection error: {e}")
         finally:
+            if transport:
+                try:
+                    transport.close()
+                except:
+                    pass
             try:
                 client_socket.close()
             except:
