@@ -49,8 +49,26 @@ def main():
     parser.add_argument("--endpoint", type=str, help="Endpoint for the LLaMA model API (legacy)")
     parser.add_argument("--provider", type=str, choices=["llama", "openai", "mcp"], 
                        help="AI provider to use")
+    parser.add_argument("--tcp", action="store_true",
+                       help="Run as TCP server instead of interactive shell")
+    parser.add_argument("--host", type=str, default="0.0.0.0",
+                       help="Host to bind to in TCP mode (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=2222,
+                       help="Port to listen on in TCP mode (default: 2222)")
     args = parser.parse_args()
 
+    # If TCP mode is requested, start the TCP server
+    if args.tcp:
+        from tcp_server import SSHTCPServer
+        server = SSHTCPServer(
+            host=args.host,
+            port=args.port,
+            endpoint=args.endpoint,
+            provider=args.provider
+        )
+        return server.start()
+
+    # Otherwise, run in interactive mode
     try:
         bash_shell = BashShell(args.endpoint, args.provider)
         
