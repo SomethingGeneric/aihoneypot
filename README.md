@@ -4,7 +4,7 @@ Trapping SSH bots in LLaMA powered hell
 
 ## Features
 
-- **TCP/SSH Honeypot Server**: Run as a network-accessible SSH-like server that accepts any credentials
+- **TCP Honeypot Server**: Run as a network-accessible server that accepts any credentials via plain text protocol
 - **Multiple AI Providers**: Support for LLaMA/Ollama, OpenAI, and MCP (Model Context Protocol)
 - **Docker Integration**: Foundation for running honeypots in isolated containers (future expansion)
 - **Flexible Configuration**: Environment-based configuration for different providers
@@ -71,11 +71,13 @@ python bash.py --tcp --provider openai --port 2222
 ```
 
 The TCP server mode:
-- Mimics an OpenSSH server banner for realistic nmap scans
+- Uses a plain text (telnet-like) protocol for authentication
 - Accepts ANY username/password combination (logs all attempts)
 - Provides an AI-powered shell session to each connected client
 - Handles multiple concurrent connections
 - Logs all commands executed by connected clients
+
+**Note**: The server uses a simple plain text protocol (similar to telnet) rather than the full SSH protocol. SSH clients will not be able to connect properly, but this prevents protocol errors and allows the honeypot to capture credentials from simpler attack scripts.
 
 **Security Note**: When running on privileged ports (< 1024), you'll need root/sudo privileges:
 ```bash

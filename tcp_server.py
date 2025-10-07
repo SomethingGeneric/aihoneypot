@@ -84,21 +84,13 @@ class SSHTCPServer:
     def _handle_client(self, client_socket: socket.socket, address: tuple):
         """Handle a client connection."""
         try:
-            # Send SSH banner to mimic OpenSSH
-            banner = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.1\r\n"
-            client_socket.send(banner)
-            
-            # Give client time to respond
-            time.sleep(0.1)
-            
-            # Try to read client banner
+            # Set timeout for client operations
             client_socket.settimeout(5.0)
-            try:
-                client_banner = client_socket.recv(1024)
-            except socket.timeout:
-                client_banner = b""
             
-            # Simple fake SSH auth - just send prompts and accept anything
+            # Use plain text protocol (telnet-like) for authentication
+            # Note: We do NOT send an SSH banner because we cannot implement
+            # the full SSH protocol. SSH clients will fail to connect, but
+            # telnet clients and simple scripts will work fine.
             client_socket.send(b"login: ")
             try:
                 username = client_socket.recv(1024).decode('utf-8', errors='ignore').strip()
