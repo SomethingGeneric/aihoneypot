@@ -235,11 +235,14 @@ class SSHTCPServer:
                     
                     # Handle exit commands
                     if command.lower() in ['exit', 'quit', 'logout']:
+                        channel.send("\r\n")
                         channel.send("logout\r\n")
                         break
                     
                     # Execute command via AI
                     try:
+                        # Send newline after command input before showing output
+                        channel.send("\r\n")
                         response = bash_shell.execute_command(command)
                         # Ensure proper line endings for network transmission
                         response = response.replace('\n', '\r\n')
